@@ -68,7 +68,7 @@ sema_down (struct semaphore *sema)
   old_level = intr_disable ();
   while (sema->value == 0) 
     {
-      list_push_back (&sema->waiters, &thread_current ()->elem);
+      list_insert_ordered (&sema->waiters, &waiter.elem, thread_cmp_priority, NULL);
       thread_block ();
     }
   sema->value--;
@@ -118,6 +118,7 @@ sema_up (struct semaphore *sema)
                                 struct thread, elem));
   sema->value++;
   intr_set_level (old_level);
+   thread_yield ();
 }
 
 static void sema_test_helper (void *sema_);
@@ -192,12 +193,30 @@ lock_init (struct lock *lock)
 void
 lock_acquire (struct lock *lock)
 {
+  struct thread *curr = thread_current ();
+
   ASSERT (lock != NULL);
   ASSERT (!intr_context ());
   ASSERT (!lock_held_by_current_thread (lock));
 
+  /* BİZİM EKLEDİĞİMİZ BAĞIŞ KODU (sema_down üstü) */
+  if (!thread_mlfqs) 
+    {
+      if (lock->holder != NULL) 
+        {
+          curr->wait_on_lock = lock;
+          list_insert_ordered (&lock->holder->donations, &curr->donation_elem, thread_cmp_donation_priority, NULL);
+          thread_donate_priority ();
+        }
+    }
+
   sema_down (&lock->semaphore);
-  lock->holder = thread_current ();
+  
+  if (!thread_mlfqs) 
+    {
+      curr->wait_on_lock = NULL;
+    }
+  lock->holder = curr;
 }
 
 /* Tries to acquires LOCK and returns true if successful or false
@@ -226,10 +245,30 @@ lock_try_acquire (struct lock *lock)
    make sense to try to release a lock within an interrupt
    handler. */
 void
-lock_release (struct lock *lock) 
+lock_release (struct lock *lock)
 {
   ASSERT (lock != NULL);
   ASSERT (lock_held_by_current_thread (lock));
+
+  /* BİZİM EKLEDİĞİMİZ BAĞIŞ TEMİZLEME KODU */
+  if (!thread_mlfqs) 
+    {
+      struct thread *curr = thread_current ();
+      struct list_elem *e = list_begin (&curr->donations);
+      while (e != list_end (&curr->donations)) 
+        {
+          struct thread *t = list_entry (e, struct thread, donation_elem);
+          if (t->wait_on_lock == lock) 
+            {
+              e = list_remove (e);
+            } 
+          else 
+            {
+              e = list_next (e);
+            }
+        }
+      thread_update_donated_priority ();
+    }
 
   lock->holder = NULL;
   sema_up (&lock->semaphore);
