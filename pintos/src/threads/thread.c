@@ -138,6 +138,15 @@ thread_tick (void)
   if (++thread_ticks >= TIME_SLICE)
     intr_yield_on_return ();
 }
+/* Iki thread'in onceligini karsilastirir */
+bool 
+thread_cmp_priority (const struct list_elem *a, const struct list_elem *b, void *aux UNUSED) 
+{
+  struct thread *ta = list_entry (a, struct thread, elem);
+  struct thread *tb = list_entry (b, struct thread, elem);
+  return ta->priority > tb->priority;
+}
+
 
 /* Prints thread statistics. */
 void
@@ -200,7 +209,11 @@ thread_create (const char *name, int priority,
 
   /* Add to run queue. */
   thread_unblock (t);
-
+/* Yeni thread'in onceligi daha yuksekse CPU'yu ona ver */
+  if (thread_current ()->priority < t->priority)
+    {
+      thread_yield ();
+    }
   return tid;
 }
 
@@ -237,7 +250,7 @@ thread_unblock (struct thread *t)
 
   old_level = intr_disable ();
   ASSERT (t->status == THREAD_BLOCKED);
-  list_push_back (&ready_list, &t->elem);
+ list_insert_ordered (&ready_list, &t->elem, thread_cmp_priority, NULL);
   t->status = THREAD_READY;
   intr_set_level (old_level);
 }
@@ -308,7 +321,7 @@ thread_yield (void)
 
   old_level = intr_disable ();
   if (cur != idle_thread) 
-    list_push_back (&ready_list, &cur->elem);
+    list_insert_ordered (&ready_list, &curr->elem, thread_cmp_priority, NULL);
   cur->status = THREAD_READY;
   schedule ();
   intr_set_level (old_level);
@@ -336,6 +349,7 @@ void
 thread_set_priority (int new_priority) 
 {
   thread_current ()->priority = new_priority;
+   thread_yield ();
 }
 
 /* Returns the current thread's priority. */
@@ -577,6 +591,37 @@ allocate_tid (void)
   lock_release (&tid_lock);
 
   return tid;
+}
+/* Mevcut thread'i uyutur */
+void 
+thread_sleep (int64_t ticks) 
+{
+  struct thread *curr = thread_current ();
+  enum intr_level old_level;
+
+  ASSERT (!intr_context ());
+
+  old_level = intr_disable ();
+  curr->wake_time = ticks;
+  thread_block ();
+  intr_set_level (old_level);
+}
+
+/* Uyanma zamanı gelenleri kontrol eder */
+void 
+thread_check_sleep (int64_t current_ticks) 
+{
+  struct list_elem *e;
+  
+  for (e = list_begin (&all_list); e != list_end (&all_list); e = list_next (e))
+    {
+      struct thread *t = list_entry (e, struct thread, allelem);
+      if (t->status == THREAD_BLOCKED && t->wake_time > 0 && t->wake_time <= current_ticks)
+        {
+          t->wake_time = 0;
+          thread_unblock (t);
+        }
+    }
 }
 
 /* Offset of `stack' member within `struct thread'.
