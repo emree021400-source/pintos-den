@@ -146,10 +146,10 @@ thread_tick (void)
   if (++thread_ticks >= TIME_SLICE)
     intr_yield_on_return ();
    
-   if (thread_mlfqs) 
+  if (thread_mlfqs)
     {
       thread_mlfqs_increment_recent_cpu ();
-      if (ticks % 4 == 0) 
+      if (timer_ticks () % 4 == 0) /* ticks yerine timer_ticks() yazdık */
         {
           thread_mlfqs_recalculate_all ();
         }
@@ -173,6 +173,10 @@ thread_print_stats (void)
    scheduled before thread_create() returns.  It could even exit
    before thread_create() returns.  Contrariwise, the original
    thread may run for any amount of time before the new thread is
+
+
+
+   
    scheduled.  Use a semaphore or some other form of
    synchronization if you need to ensure ordering.
 
@@ -478,6 +482,13 @@ init_thread (struct thread *t, const char *name, int priority)
   ASSERT (PRI_MIN <= priority && priority <= PRI_MAX);
   ASSERT (name != NULL);
   
+  
+
+  memset (t, 0, sizeof *t);
+  t->status = THREAD_BLOCKED;
+  strlcpy (t->name, name, sizeof t->name);
+  t->stack = (uint8_t *) t + PGSIZE;
+  t->priority = priority;
    t->base_priority = priority;
   list_init (&t->donations);
   t->wait_on_lock = NULL;
@@ -489,12 +500,6 @@ init_thread (struct thread *t, const char *name, int priority)
       t->nice = thread_current ()->nice;
       t->recent_cpu = thread_current ()->recent_cpu;
   }
-
-  memset (t, 0, sizeof *t);
-  t->status = THREAD_BLOCKED;
-  strlcpy (t->name, name, sizeof t->name);
-  t->stack = (uint8_t *) t + PGSIZE;
-  t->priority = priority;
   t->magic = THREAD_MAGIC;
 
   old_level = intr_disable ();
