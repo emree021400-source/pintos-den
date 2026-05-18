@@ -14,7 +14,8 @@
 #ifdef USERPROG
 #include "userprog/process.h"
 #endif
-
+/* Global MLFQS Degiskeni */
+int load_avg;
 /* Random value for struct thread's `magic' member.
    Used to detect stack overflow.  See the big comment at the top
    of thread.h for details. */
@@ -99,7 +100,7 @@ thread_init (void)
   lock_init (&tid_lock);
   list_init (&ready_list);
   list_init (&all_list);
-
+load_avg = 0; 
   /* Set up a thread structure for the running thread. */
   initial_thread = running_thread ();
   init_thread (initial_thread, "main", PRI_DEFAULT);
@@ -144,6 +145,15 @@ thread_tick (void)
   /* Enforce preemption. */
   if (++thread_ticks >= TIME_SLICE)
     intr_yield_on_return ();
+   
+   if (thread_mlfqs) 
+    {
+      thread_mlfqs_increment_recent_cpu ();
+      if (ticks % 4 == 0) 
+        {
+          thread_mlfqs_recalculate_all ();
+        }
+    }
 }
 
 /* Prints thread statistics. */
@@ -343,10 +353,12 @@ thread_foreach (thread_action_func *func, void *aux)
 void
 thread_set_priority (int new_priority) 
 {
-  thread_current ()->priority = new_priority;
-   thread_yield ();
+  if (thread_mlfqs) return; /* MLFQS aktifse manuel oncelik degistirilemez */
+  
+  thread_current ()->base_priority = new_priority;
+  thread_update_donated_priority ();
+  thread_yield (); 
 }
-
 /* Returns the current thread's priority. */
 int
 thread_get_priority (void) 
@@ -465,6 +477,18 @@ init_thread (struct thread *t, const char *name, int priority)
   ASSERT (t != NULL);
   ASSERT (PRI_MIN <= priority && priority <= PRI_MAX);
   ASSERT (name != NULL);
+  
+   t->base_priority = priority;
+  list_init (&t->donations);
+  t->wait_on_lock = NULL;
+  
+  if (t == initial_thread) {
+      t->nice = 0;
+      t->recent_cpu = 0;
+  } else {
+      t->nice = thread_current ()->nice;
+      t->recent_cpu = thread_current ()->recent_cpu;
+  }
 
   memset (t, 0, sizeof *t);
   t->status = THREAD_BLOCKED;
@@ -614,7 +638,121 @@ thread_check_sleep (int64_t current_ticks)
         }
     }
 }
+/* Bagis onceliklerini karsilastiran yardimci fonksiyon */
+bool 
+thread_cmp_donation_priority (const struct list_elem *a, const struct list_elem *b, void *aux UNUSED) 
+{
+  struct thread *ta = list_entry (a, struct thread, donation_elem);
+  struct thread *tb = list_entry (b, struct thread, donation_elem);
+  return ta->priority > tb->priority;
+}
 
+/* Oncelik bagisini zincirleme olarak iletir (Nested Donation) */
+void 
+thread_donate_priority (void) 
+{
+  struct thread *curr = thread_current ();
+  struct lock *l = curr->wait_on_lock;
+  int depth = 0;
+  
+  while (l != NULL && depth < 8) 
+    {
+      if (l->holder == NULL) break;
+      if (l->holder->priority < curr->priority) 
+        {
+          l->holder->priority = curr->priority;
+          curr = l->holder;
+          l = curr->wait_on_lock;
+          depth++;
+        } 
+      else 
+        {
+          break;
+        }
+    }
+}
+
+/* Bir kilit birakildiginda onceligi eski haline getirir */
+void 
+thread_update_donated_priority (void) 
+{
+  struct thread *curr = thread_current ();
+  curr->priority = curr->base_priority;
+  
+  if (!list_empty (&curr->donations)) 
+    {
+      struct thread *highest_donation = list_entry (list_begin (&curr->donations), struct thread, donation_elem);
+      if (highest_donation->priority > curr->priority) 
+        {
+          curr->priority = highest_donation->priority;
+        }
+    }
+}
+
+/* MLFQS Formulleri */
+void 
+thread_mlfqs_calculate_priority (struct thread *t) 
+{
+  if (t == idle_thread) return;
+  int term1 = INT_TO_FIXED (PRI_MAX);
+  int term2 = DIV_INT (t->recent_cpu, 4);
+  int term3 = MULT_INT (INT_TO_FIXED (t->nice), 2);
+  t->priority = FIXED_TO_INT_ZERO (SUB_FIXED (SUB_FIXED (term1, term2), term3));
+  if (t->priority > PRI_MAX) t->priority = PRI_MAX;
+  if (t->priority < PRI_MIN) t->priority = PRI_MIN;
+}
+
+void 
+thread_mlfqs_calculate_recent_cpu (struct thread *t) 
+{
+  if (t == idle_thread) return;
+  int load_2 = MULT_INT (load_avg, 2);
+  int coeff = DIV_FIXED (load_2, ADD_INT (load_2, 1));
+  t->recent_cpu = ADD_INT (MULT_FIXED (coeff, t->recent_cpu), t->nice);
+}
+
+void 
+thread_mlfqs_calculate_load_avg (void) 
+{
+  int ready_threads = list_size (&ready_list);
+  if (thread_current () != idle_thread) ready_threads++;
+  
+  int term1 = MULT_FIXED (DIV_INT (INT_TO_FIXED (59), 60), load_avg);
+  int term2 = MULT_INT (DIV_INT (INT_TO_FIXED (1), 60), ready_threads);
+  load_avg = ADD_FIXED (term1, term2);
+}
+
+void 
+thread_mlfqs_increment_recent_cpu (void) 
+{
+  struct thread *curr = thread_current ();
+  if (curr != idle_thread) 
+    {
+      curr->recent_cpu = ADD_INT (curr->recent_cpu, 1);
+    }
+}
+
+void 
+thread_mlfqs_recalculate_all (void) 
+{
+  struct list_elem *e;
+  int64_t ticks = timer_ticks ();
+  
+  if (ticks % 100 == 0) 
+    {
+      thread_mlfqs_calculate_load_avg ();
+    }
+    
+  for (e = list_begin (&all_list); e != list_end (&all_list); e = list_next (e)) 
+    {
+      struct thread *t = list_entry (e, struct thread, allelem);
+      if (ticks % 100 == 0) 
+        {
+          thread_mlfqs_calculate_recent_cpu (t);
+        }
+      thread_mlfqs_calculate_priority (t);
+    }
+}
 
 /* Offset of `stack' member within `struct thread'.
    Used by switch.S, which can't figure it out on its own. */
